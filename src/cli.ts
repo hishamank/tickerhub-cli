@@ -2,6 +2,38 @@
 import { Command } from "commander";
 import { wireService } from "./service.js";
 
+// Suppress noisy yahoo-finance2 survey/deprecation notices that are not useful
+// in an agent-facing CLI. The notices are emitted via console.log/console.warn
+// before we can configure the YahooFinance instance, so we filter the streams.
+const YAHOO_NOTICE_PATTERNS = [
+  /Please consider completing the survey at https:\/\/bit\.ly\/yahoo-finance-api-feedback/,
+  /for more info see https:\/\/github\.com\/gadicc\/yahoo-finance2\/issues\/\d+#issuecomment-/,
+  /\[Deprecated\] historical\(\) relies on an API that Yahoo have removed/,
+  /We'll map this request to chart\(\) for convenience/,
+  /please consider using chart\(\) directly instead/,
+  /This will only be shown once, but you can suppress this message in future/,
+];
+
+function isYahooNotice(chunk: unknown): boolean {
+  if (typeof chunk !== "string") return false;
+  return YAHOO_NOTICE_PATTERNS.some((pattern) => pattern.test(chunk));
+}
+
+function filterStream(stream: NodeJS.WriteStream): void {
+  const originalWrite = stream.write.bind(stream);
+  stream.write = ((chunk: unknown, encoding?: unknown, cb?: unknown) => {
+    if (isYahooNotice(chunk)) return true;
+    return (originalWrite as (chunk: unknown, encoding?: unknown, cb?: unknown) => boolean)(
+      chunk,
+      encoding as BufferEncoding,
+      cb as () => void,
+    );
+  }) as typeof stream.write;
+}
+
+filterStream(process.stdout);
+filterStream(process.stderr);
+
 const program = new Command();
 
 program
