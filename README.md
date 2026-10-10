@@ -55,6 +55,16 @@ Global flags:
 
 After `pnpm run build` the binary is available as `dist/cli.js` or `tickerhub` if linked.
 
+## Output contract
+
+stdout carries exactly one JSON document per invocation — the command result. Console diagnostics go to stderr; known Yahoo survey/deprecation notices are suppressed, so pipes work unchanged:
+
+```bash
+tickerhub --no-metadata quote SPY | jq .price
+```
+
+Errors exit with code 1 and are reported on stderr only. Help and version output remain on stdout. SQLite stores close when active event-loop work drains; unresolved promises alone do not keep the process alive.
+
 ## SQLite cache
 
 The CLI wires `tickerhub` with durable SQLite stores for cache, rate limits, config, and health metrics. One DB file survives restarts and shared use.
