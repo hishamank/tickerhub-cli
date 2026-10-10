@@ -1,20 +1,4 @@
-/**
- * CLI program: command wiring.
- *
- * Loaded (dynamically) by cli.ts AFTER output routing is installed, so any
- * library diagnostics emitted while this module graph evaluates already go
- * to stderr. See src/output.ts and src/cli.ts.
- *
- * Output contract: stdout receives exactly one JSON document per invocation
- * via `print()`. Lifecycle: SQLite stores are NOT closed eagerly after the
- * response — the upstream SWR cache may still be writing a background
- * refresh. Closes are deferred to `beforeExit` via src/lifecycle.ts, so
- * the event loop drains (outstanding fetches settle) before the database
- * is closed exactly once. Errors set `process.exitCode` instead of calling
- * `process.exit()`, letting outstanding work finish instead of aborting
- * native teardown mid-flight.
- */
-
+/** Command wiring, loaded after CLI output routing is installed. */
 import { Command } from "commander";
 import { createService, wireService } from "./service.js";
 import { registerDeferredClose } from "./lifecycle.js";
@@ -64,25 +48,19 @@ function parseDate(value: string): Date {
   return d;
 }
 
-/**
- * Run `fn` with a wired service. The service's SQLite handles are closed
- * on `beforeExit` (see src/lifecycle.ts), NOT here: the upstream SWR cache
- * serves stale data while a background refresh promise is still running,
- * and closing the DB in a `finally` right after the response races with
- * that write (the reported exit-134 native abort happened in this window).
- */
+/** Keep stores open until active event-loop work drains. */
 async function withService<T>(
   cmd: Command,
   fn: (service: Awaited<ReturnType<typeof createServiceFromCmd>>) => Promise<T>,
 ): Promise<T> {
   const svc = await createServiceFromCmd(cmd);
-  registerDeferredClose(svc.close);
   return fn(svc);
 }
 
 async function createServiceFromCmd(cmd: Command) {
   const opts = globals(cmd);
   const { options, close } = await wireService({ dbPath: opts.db });
+  registerDeferredClose(close);
   const { service } = createService(options);
   return { service, close };
 }

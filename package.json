@@ -12,7 +12,7 @@
     "build": "tsup",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "tsup && vitest run"
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0",

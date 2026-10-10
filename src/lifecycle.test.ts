@@ -20,6 +20,8 @@ describe("deferred close registry", () => {
   });
 
   it("a throwing close does not prevent the remaining closes", () => {
+    const originalExitCode = process.exitCode;
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
     const failing = vi.fn(() => {
       throw new Error("boom");
     });
@@ -29,6 +31,9 @@ describe("deferred close registry", () => {
     expect(() => runDeferredCloses()).not.toThrow();
     expect(failing).toHaveBeenCalledTimes(1);
     expect(after).toHaveBeenCalledTimes(1);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = originalExitCode;
+    log.mockRestore();
   });
 
   it("installs exactly one beforeExit handler for many registrations", () => {

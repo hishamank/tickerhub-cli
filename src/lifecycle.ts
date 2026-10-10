@@ -1,20 +1,7 @@
 /**
- * Deferred cleanup registry for CLI-invoked services.
- *
- * The CLI's SQLite stores may still be in use when the response has been
- * printed: the upstream SWR cache serves stale data while a background
- * refresh is still running (stale-while-revalidate), and closing the
- * database in a `finally` right after the response can race with that
- * write — the reported exit-134 native abort (`RemoveEnvironmentCleanupHook`
- * assertion in Node) happened in exactly this window.
- *
- * Instead of closing eagerly, services register their `close` here and
- * the process closes them once the event loop has drained (`beforeExit`):
- * any pending background refresh completes first, then the database is
- * closed exactly once. Library consumers of `wireService()` keep explicit
- * close semantics; this registry is only wired up by the CLI.
+ * Close CLI stores once active event-loop handles drain. beforeExit does not
+ * wait for unresolved promises that have no active handles.
  */
-
 const pendingCloses: Array<() => void> = [];
 let handlerInstalled = false;
 
@@ -46,6 +33,7 @@ export function runDeferredCloses(): void {
     try {
       close();
     } catch (error) {
+      process.exitCode = 1;
       console.error("[cleanup] deferred close failed:", error);
     }
   }

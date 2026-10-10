@@ -1,32 +1,11 @@
-/**
- * Subprocess regression tests for the CLI output/lifecycle contract.
- *
- * These spawn the real CLI (src/cli.ts via tsx) as a child process, the same
- * way `tickerhub` runs in production, and assert from the outside:
- *
- * 1. stdout carries exactly one JSON document — the seeded stale-cache quote
- *    — so `... | jq .price` works. Diagnostics (the provider-registry INFO
- *    lines, SWR debug lines, background-refresh warnings) go to stderr.
- * 2. Serving stale data fires the upstream SWR background refresh; the
- *    process still exits 0 with SQLite closing on `beforeExit` (the
- *    exit-134 window: DB closed while a background refresh was in flight).
- * 3. Errors set the exit code to 1 without stdout noise.
- * 4. Commander --help still writes human-readable output to stdout.
- *
- * The stale entry is seeded directly into the SQLite cache, so the stale
- * serve + background refresh path is reached deterministically without
- * needing a prior successful fetch.
- */
-
 import { afterAll, describe, expect, it } from "vitest";
-import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
-const tsxCli = join(projectRoot, "node_modules", "tsx", "dist", "cli.mjs");
 const cliEntry = join(projectRoot, "src", "cli.ts");
 
 const tmpDirs: string[] = [];
@@ -34,42 +13,50 @@ afterAll(() => {
   for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
 });
 
-function runCli(args: string[]): Promise<{ stdout: string; stderr: string; code: number | null }> {
+function runChild(entry: string, args: string[] = []): Promise<{ stdout: string; stderr: string; code: number | null; signal: string | null; killed: boolean }> {
+  const dir = mkdtempSync(join(tmpdir(), "tickerhub-child-"));
+  tmpDirs.push(dir);
+  const stdoutPath = join(dir, "stdout");
+  const stderrPath = join(dir, "stderr");
+  const stdoutFd = openSync(stdoutPath, "w");
+  const stderrFd = openSync(stderrPath, "w");
   return new Promise((resolvePromise, reject) => {
-    execFile(
-      process.execPath,
-      [tsxCli, cliEntry, ...args],
-      { cwd: projectRoot, timeout: 60_000 },
-      (error, stdout, stderr) => {
-        if (error && (error as NodeJS.ErrnoException).code === "ENOENT") {
-          reject(error);
-          return;
-        }
-        // error carries a non-zero code; normalize it out of the result.
-        const code = error ? (error as NodeJS.ErrnoException & { code?: number }).code ?? 1 : 0;
-        resolvePromise({ stdout: String(stdout), stderr: String(stderr), code });
-      },
-    );
+    // Files also work where sandboxed child-process pipes cannot be read.
+    const child = spawn(process.execPath, ["--import", "tsx", entry, ...args], {
+      cwd: projectRoot, timeout: 10_000, stdio: ["ignore", stdoutFd, stderrFd],
+    });
+    closeSync(stdoutFd);
+    closeSync(stderrFd);
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      resolvePromise({ stdout: readFileSync(stdoutPath, "utf8"),
+        stderr: readFileSync(stderrPath, "utf8"), code, signal, killed: child.killed });
+    });
   });
 }
 
-/** Seed a stale-but-not-expired getQuote cache entry for `symbol`. */
-async function seedStaleQuote(dbPath: string, symbol: string, price: number): Promise<void> {
+async function runCli(args: string[]) {
+  const result = await runChild(cliEntry, args);
+  expect(result.signal).toBeNull();
+  expect(result.killed).toBe(false);
+  return result;
+}
+
+/** Seed a fresh quote so command tests never fetch from providers. */
+async function seedFreshQuote(dbPath: string, symbol: string, price: number): Promise<void> {
   const { openSqliteStores } = await import("tickerhub/sqlite");
   const { db, cache } = await openSqliteStores(dbPath);
   try {
     const now = Date.now();
-    // getQuote TTL: staleAfter 60s, maxAge 300s (src/cache/ttl-config.ts in
-    // tickerhub). fetched 120s ago: stale (past staleAt) but not expired.
     const entry = {
       data: {
         symbol,
         price,
         currency: "USD",
-        timestamp: new Date(now - 120_000).toISOString(),
+        timestamp: new Date(now).toISOString(),
       },
-      fetchedAt: now - 120_000,
-      staleAt: now - 60_000,
+      fetchedAt: now,
+      staleAt: now + 60_000,
       expiresAt: now + 180_000,
     };
     await cache.set(`provider-aggregator:getQuote:${symbol}`, entry, 180);
@@ -85,7 +72,7 @@ describe("CLI subprocess contract", () => {
       const dir = mkdtempSync(join(tmpdir(), "tickerhub-cli-test-"));
       tmpDirs.push(dir);
       const dbPath = join(dir, "cache.db");
-      await seedStaleQuote(dbPath, "SPY", 999.5);
+      await seedFreshQuote(dbPath, "SPY", 999.5);
 
       const { stdout, stderr, code } = await runCli([
         "--db",
@@ -104,13 +91,11 @@ describe("CLI subprocess contract", () => {
       expect(stdout).not.toContain("[INFO]");
       expect(stdout).not.toContain("[DEBUG]");
 
-      // stderr carries the diagnostics that previously polluted stdout:
-      // the provider-registry INFO line is emitted on every command via
-      // console.info, so it must be present here — routed, not swallowed.
+      // Module diagnostics must be routed before tickerhub is imported.
       expect(stderr).toContain("[INFO]");
       expect(stderr).toContain("provider-registry");
     },
-    90_000,
+    15_000,
   );
 
   it(
@@ -133,7 +118,7 @@ describe("CLI subprocess contract", () => {
       expect(stdout).toBe("");
       expect(stderr).toContain("Invalid date");
     },
-    60_000,
+    15_000,
   );
 
   it(
@@ -145,6 +130,65 @@ describe("CLI subprocess contract", () => {
       // Help output is the one non-JSON stdout document the CLI produces,
       // written by Commander through process.stdout directly.
     },
-    60_000,
+    15_000,
   );
+});
+
+describe("deterministic subprocess fixtures", () => {
+  for (const exitCode of [0, 1]) {
+    it(`persists delayed SWR refresh and closes once with exitCode ${exitCode}`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "tickerhub-swr-test-"));
+      tmpDirs.push(dir);
+      const dbPath = join(dir, "cache.db");
+      const marker = join(dir, "events");
+      const result = await runChild(join(projectRoot, "tests/fixtures/swr-lifecycle.ts"), [dbPath, marker, String(exitCode)]);
+      expect(result.signal).toBeNull();
+      expect(result.killed).toBe(false);
+      expect(result.code).toBe(exitCode);
+      expect(JSON.parse(result.stdout)).toEqual({ symbol: "SPY", price: 999.5 });
+      expect(readFileSync(marker, "utf8")).toBe("output\nfetch\nclose\n");
+      expect(result.stderr).not.toMatch(/failed|error|cleanup/i);
+      const { openSqliteStores } = await import("tickerhub/sqlite");
+      const { generateCacheKey } = await import("tickerhub");
+      const { db, cache } = await openSqliteStores(dbPath);
+      try {
+        const refreshed = await cache.get<import("tickerhub").CacheEntry<{ symbol: string; price: number }>>(generateCacheKey("getQuote", "SPY"));
+        expect(refreshed?.data).toEqual({ symbol: "SPY", price: 123.45 });
+        expect(refreshed?.staleAt).toBeGreaterThan(Date.now());
+      } finally { db.close(); }
+    }, 15_000);
+  }
+
+  it("filters console notices while preserving JSON and stream callbacks", async () => {
+    const result = await runChild(join(projectRoot, "tests/fixtures/output.ts"));
+    expect(result.code).toBe(0);
+    expect(result.signal).toBeNull();
+    expect(result.killed).toBe(false);
+    const lines = result.stdout.trim().split("\n");
+    expect(JSON.parse(lines[0]!)).toEqual({ notice: "Please consider completing the survey at https://bit.ly/yahoo-finance-api-feedback" });
+    expect(lines[1]).toBe("callback");
+    expect(result.stderr).toBe("diagnostic\nbuffer callback\n");
+  });
+
+  it("keeps version on stdout", async () => {
+    const result = await runCli(["--version"]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe("0.1.0\n");
+  });
+});
+
+it("preserves bootstrap order and diagnostics in the bundled CLI", async () => {
+  const bundle = readFileSync(join(projectRoot, "dist/cli.js"), "utf8");
+  expect(bundle.indexOf("installCliOutputRouting();")).toBeLessThan(bundle.indexOf('await import("./main-'));
+  expect(bundle).not.toMatch(/from ["']tickerhub/);
+  const dir = mkdtempSync(join(tmpdir(), "tickerhub-bundle-"));
+  tmpDirs.push(dir);
+  const dbPath = join(dir, "cache.db");
+  await seedFreshQuote(dbPath, "SPY", 999.5);
+  const result = await runChild(join(projectRoot, "dist/cli.js"), ["--db", dbPath, "--no-metadata", "quote", "SPY"]);
+  expect(result.code).toBe(0);
+  expect(result.signal).toBeNull();
+  expect(result.killed).toBe(false);
+  expect(JSON.parse(result.stdout).price).toBe(999.5);
+  expect(result.stderr).toContain("provider-registry");
 });
