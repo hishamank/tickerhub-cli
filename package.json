@@ -15,7 +15,7 @@
     "test": "tsup && vitest run"
   },
   "dependencies": {
-    "better-sqlite3": "^11.10.0",
+    "better-sqlite3": "13.0.3",
     "commander": "^12.1.0",
     "dotenv": "^16.4.5",
     "tickerhub": "latest"
@@ -29,6 +29,6 @@
     "vitest": "^2.1.8"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }
