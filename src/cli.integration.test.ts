@@ -192,3 +192,27 @@ it("preserves bootstrap order and diagnostics in the bundled CLI", async () => {
   expect(JSON.parse(result.stdout).price).toBe(999.5);
   expect(result.stderr).toContain("provider-registry");
 });
+
+// Deterministic process-lifecycle probes document the beforeExit limits.
+describe("deferred closes in real subprocesses", () => {
+  for (const mode of ["multiple", "throwing", "handleless", "forced"] as const) {
+    it(`${mode}: closes and exit behavior`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "tickerhub-closes-"));
+      tmpDirs.push(dir);
+      const marker = join(dir, "events");
+      const result = await runChild(join(projectRoot, "tests/fixtures/deferred-closes.ts"), [mode, marker]);
+      expect(result.signal).toBeNull();
+      expect(result.killed).toBe(false);
+      expect(result.stdout).toBe("");
+      expect(result.code).toBe(mode === "throwing" ? 1 : 0);
+      expect(readFileSync(marker, "utf8")).toBe(
+        mode === "forced" ? "forced-exit\n" : mode === "handleless"
+          ? "promise-pending\nclose-a\nclose-b\n" : "close-a\nclose-b\ndrained-again\n",
+      );
+      if (mode === "throwing") {
+        expect(result.stderr).toContain("[cleanup] deferred close failed:");
+        expect(result.stderr).toContain("synthetic close failure");
+      } else expect(result.stderr).toBe("");
+    }, 15_000);
+  }
+});
